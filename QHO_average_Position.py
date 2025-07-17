@@ -2,23 +2,21 @@ import random
 import math
 import matplotlib.pyplot as plt
 import numpy as np
-import matplotlib.pyplot as plt
-import numpy as np
 
 class QuantumPathIntegral:
     def __init__(self, slices, get_params):
         self.warmup, self.mc_steps, self.save_gap, self.step_size, self.slices, self.freq, self.mass = get_params(slices)
 
-        # Initial path and data holders
         self.path = [random.uniform(-0.5, 0.5) for _ in range(self.slices)]
         self.trial = [0.0] * self.slices
         self.old = [0.0] * self.slices
         self.auto_corr = [0.0] * self.slices
         self.auto_corr_sq = [0.0] * self.slices
 
-        # For energy averages
         self.avg_x = 0.0
         self.avg_x2 = 0.0
+        self.avg_x_sq = 0.0
+        self.avg_x2_sq = 0.0
 
     def relax_system(self):
         print(f"Equilibrating {self.slices} time slices...")
@@ -50,6 +48,7 @@ class QuantumPathIntegral:
     def collect_statistics(self):
         print(f"Running Monte Carlo for {self.slices} points...")
         norm_factor = self.save_gap / (2.0 * self.mass * self.freq * self.mc_steps)
+        num_samples = self.mc_steps // self.save_gap
 
         for step in range(self.mc_steps):
             for i in range(self.slices):
@@ -80,25 +79,49 @@ class QuantumPathIntegral:
                     prod = xt * x0 * norm_factor
                     self.auto_corr[j] += prod
                     self.auto_corr_sq[j] += prod**2
+
                     self.avg_x += self.path[j]
-                    self.avg_x2 += self.path[j]**2 / (2 * self.mass * self.freq)
+                    x_sq = self.path[j]**2
+                    x2_term = x_sq / (2 * self.mass * self.freq)
+
+                    self.avg_x2 += x2_term
+                    self.avg_x_sq += x_sq
+                    self.avg_x2_sq += x2_term**2
 
         renorm = self.save_gap / (self.mc_steps * self.slices)
-        self.avg_x *= renorm
-        self.avg_x2 *= renorm
+        x_mean = self.avg_x * renorm
+        x2_mean = self.avg_x2 * renorm
 
-        # Harmonic oscillator energy: E = <V> + <K>
-        energy = 0.5 * self.mass * self.freq**2 * self.avg_x2 + 0.5 * self.avg_x2 / (self.mass * self.freq**2)
+        x_var = (self.avg_x_sq * renorm - x_mean**2) / num_samples
+        x2_var = (self.avg_x2_sq * renorm - x2_mean**2) / num_samples
 
-        print(f"<x^2> = {self.avg_x2:.6f}")
-        print(f"<x> = {self.avg_x:.6f}")
-        print(f"Estimated Ground State Energy: {energy:.6f}\n")
+        x_err = math.sqrt(abs(x_var))
+        x2_err = math.sqrt(abs(x2_var))
 
-        return self.auto_corr, energy
+        energy = 0.5 * self.mass * self.freq**2 * x2_mean + 0.5 * x2_mean / (self.mass * self.freq**2)
+        energy_err = (
+            0.5 * self.mass * self.freq**2 + 0.5 / (self.mass * self.freq**2)
+        ) * x2_err
+
+        print(f"<x^2> = {x2_mean:.6f} ± {x2_err:.6f}")
+        print(f"<x>   = {x_mean:.6f} ± {x_err:.6f}")
+        print(f"Estimated Ground State Energy: {energy:.6f} ± {energy_err:.6f}\n")
+
+        return self.auto_corr, self.auto_corr_sq, energy, energy_err, x_mean, x_err
 
 
+# Plotting and parameter setup
 
-# Style settings
+def setup_parameters(n):
+    thermal_steps = 100000
+    monte_carlo_steps = 1000000
+    output_interval = 100
+    trial_step = 0.5
+    frequency = 1.0
+    mass = 1.0
+    return thermal_steps, monte_carlo_steps, output_interval, trial_step, n, frequency, mass
+
+
 params = {
     "ytick.color": "black",
     "xtick.color": "black",
@@ -111,24 +134,17 @@ params = {
 }
 plt.rcParams.update(params)
 
-def setup_parameters(n):
-    thermal_steps = 100000
-    monte_carlo_steps = 1000000
-    output_interval = 100
-    trial_step = 0.5
-    frequency = 1.0
-    mass = 1.0
-    return thermal_steps, monte_carlo_steps, output_interval, trial_step, n, frequency, mass
 
-def visualize_correlations(all_corrs, ns):
+def visualize_correlations(all_corrs, all_errs, ns):
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
-    fig.suptitle("Time-Displaced Correlation $\\langle x(\\tau)x(0) \\rangle$", fontsize=18)
+    fig.suptitle("Time-Displaced Correlation $\\langle x(\\tau)x(0) \\rangle$ with Errors", fontsize=18)
 
-    for idx, corr in enumerate(all_corrs):
+    for idx, (corr, err) in enumerate(zip(all_corrs, all_errs)):
         ax = axes[idx // 2, idx % 2]
         normed = corr / corr[0]
+        normed_err = err / corr[0]
         tau_vals = np.arange(len(corr))
-        ax.plot(tau_vals, normed, lw=2, color='black')
+        ax.errorbar(tau_vals, normed, yerr=normed_err, fmt='o-', lw=2, color='black', ecolor='red', capsize=3)
         ax.set_title(f"Time Slices: N = {ns[idx]}", fontsize=14)
         ax.set_xlabel("$\\tau$", fontsize=13)
         ax.set_ylabel("$C(\\tau)$", fontsize=13)
@@ -138,9 +154,9 @@ def visualize_correlations(all_corrs, ns):
     plt.show()
 
 
-def plot_avg_x(ns, x_means):
+def plot_avg_x(ns, x_means, x_errs):
     plt.figure(figsize=(8, 6))
-    plt.plot(ns, x_means, 'o-', color='darkred', linewidth=2)
+    plt.errorbar(ns, x_means, yerr=x_errs, fmt='o-', color='darkred', capsize=4)
     plt.axhline(0, color='gray', linestyle='--', linewidth=1)
     plt.title("Average Position $\\langle x \\rangle$ vs Number of Slices", fontsize=16)
     plt.xlabel("Number of Time Slices (N)", fontsize=14)
@@ -152,20 +168,34 @@ def plot_avg_x(ns, x_means):
 if __name__ == "__main__":
     time_slices_list = [8, 16, 32, 64]
     correlations = []
+    errors = []
     energies = []
+    energy_errs = []
     x_means = []
+    x_mean_errs = []
 
     for N in time_slices_list:
         qpi = QuantumPathIntegral(N, setup_parameters)
         qpi.relax_system()
-        corr, e0 = qpi.collect_statistics()
+        corr, corr_sq, e0, e0_err, x_mean, x_err = qpi.collect_statistics()
 
-        correlations.append(np.array(corr))
+        num_samples = qpi.mc_steps // qpi.save_gap
+        corr = np.array(corr)
+        corr_sq = np.array(corr_sq)
+
+        mean_corr = corr / num_samples
+        mean_corr_sq = corr_sq / num_samples
+        std_err = np.sqrt((mean_corr_sq - mean_corr**2) / num_samples)
+
+        correlations.append(mean_corr)
+        errors.append(std_err)
         energies.append(e0)
-        x_means.append(qpi.avg_x)  # ⟨x⟩ for this N
+        energy_errs.append(e0_err)
+        x_means.append(x_mean)
+        x_mean_errs.append(x_err)
 
-        print(f"N = {N}, ⟨x⟩ = {qpi.avg_x:.6e}")
+        print(f"N = {N}, ⟨x⟩ = {x_mean:.6e} ± {x_err:.2e}")
+        print(f"Energy = {e0:.6f} ± {e0_err:.6f}")
 
-    visualize_correlations(correlations, time_slices_list)
-    plot_avg_x(time_slices_list, x_means)
-
+    visualize_correlations(correlations, errors, time_slices_list)
+    plot_avg_x(time_slices_list, x_means, x_mean_errs)
