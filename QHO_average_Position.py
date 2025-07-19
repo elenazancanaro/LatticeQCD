@@ -1,7 +1,8 @@
 import random
 import math
-import matplotlib.pyplot as plt
 import numpy as np
+import matplotlib.pyplot as plt
+from scipy.optimize import curve_fit
 
 class QuantumPathIntegral:
     def __init__(self, slices, get_params):
@@ -19,8 +20,6 @@ class QuantumPathIntegral:
         self.avg_x2_sq = 0.0
 
     def relax_system(self):
-        print(f"Equilibrating {self.slices} time slices...")
-
         for _ in range(self.warmup):
             for i in range(self.slices):
                 left = self.path[(i - 1) % self.slices]
@@ -46,7 +45,6 @@ class QuantumPathIntegral:
                     self.path[i] = self.old[i]
 
     def collect_statistics(self):
-        print(f"Running Monte Carlo for {self.slices} points...")
         norm_factor = self.save_gap / (2.0 * self.mass * self.freq * self.mc_steps)
         num_samples = self.mc_steps // self.save_gap
 
@@ -103,99 +101,58 @@ class QuantumPathIntegral:
             0.5 * self.mass * self.freq**2 + 0.5 / (self.mass * self.freq**2)
         ) * x2_err
 
-        print(f"<x^2> = {x2_mean:.6f} ± {x2_err:.6f}")
-        print(f"<x>   = {x_mean:.6f} ± {x_err:.6f}")
-        print(f"Estimated Ground State Energy: {energy:.6f} ± {energy_err:.6f}\n")
-
         return self.auto_corr, self.auto_corr_sq, energy, energy_err, x_mean, x_err
 
-
-# Plotting and parameter setup
-
 def setup_parameters(n):
-    thermal_steps = 100000
-    monte_carlo_steps = 1000000
-    output_interval = 100
-    trial_step = 0.5
-    frequency = 1.0
-    mass = 1.0
-    return thermal_steps, monte_carlo_steps, output_interval, trial_step, n, frequency, mass
+    return 100000, 1000000, 100, 0.5, n, 1.0, 1.0
 
+def symmetric_exp(tau, A, E, beta):
+    return A * (np.exp(-E * tau) + np.exp(-E * (beta - tau)))
 
-params = {
-    "ytick.color": "black",
-    "xtick.color": "black",
-    "axes.labelcolor": "black",
-    "axes.edgecolor": "black",
-    "font.family": "serif",
-    "font.serif": "DejaVu Serif",
-    "figure.facecolor": "white",
-    "axes.facecolor": "white"
-}
-plt.rcParams.update(params)
+def fit_energy_from_corr(correlation, beta):
+    N = len(correlation)
+    tau_vals = np.arange(N)
+    norm_corr = correlation / correlation[0]
 
+    tau_fit = tau_vals[1:N//2]
+    corr_fit = norm_corr[1:N//2]
 
-def visualize_correlations(all_corrs, all_errs, ns):
-    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
-    fig.suptitle("Time-Displaced Correlation $\\langle x(\\tau)x(0) \\rangle$ with Errors", fontsize=18)
+    popt, pcov = curve_fit(lambda tau, A, E: symmetric_exp(tau, A, E, beta), tau_fit, corr_fit, p0=(1.0, 1.0))
+    A_fit, E_fit = popt
+    E_fit_err = np.sqrt(np.diag(pcov))[1]
+    return E_fit, E_fit_err, A_fit
 
-    for idx, (corr, err) in enumerate(zip(all_corrs, all_errs)):
-        ax = axes[idx // 2, idx % 2]
-        normed = corr / corr[0]
-        normed_err = err / corr[0]
-        tau_vals = np.arange(len(corr))
-        ax.errorbar(tau_vals, normed, yerr=normed_err, fmt='o-', lw=2, color='black', ecolor='red', capsize=3)
-        ax.set_title(f"Time Slices: N = {ns[idx]}", fontsize=14)
-        ax.set_xlabel("$\\tau$", fontsize=13)
-        ax.set_ylabel("$C(\\tau)$", fontsize=13)
-        ax.grid(True, linestyle='--', alpha=0.6)
-
-    plt.tight_layout(rect=[0, 0, 1, 0.96])
-    plt.show()
-
-
-def plot_avg_x(ns, x_means, x_errs):
+def plot_fit(tau_vals, corr_vals, fit_vals, N):
     plt.figure(figsize=(8, 6))
-    plt.errorbar(ns, x_means, yerr=x_errs, fmt='o-', color='darkred', capsize=4)
-    plt.axhline(0, color='gray', linestyle='--', linewidth=1)
-    plt.title("Average Position $\\langle x \\rangle$ vs Number of Slices", fontsize=16)
-    plt.xlabel("Number of Time Slices (N)", fontsize=14)
-    plt.ylabel("$\\langle x \\rangle$", fontsize=14)
-    plt.grid(True, linestyle='--', alpha=0.6)
+    plt.plot(tau_vals, corr_vals, 'o', label="Data", markersize=4)
+    plt.plot(tau_vals, fit_vals, '-', label="Fit", linewidth=2)
+    plt.xlabel(r'$\\tau$', fontsize=14)
+    plt.ylabel(r'$C(\\tau)/C(0)$', fontsize=14)
+    plt.title(f'Correlation Fit for N = {N}', fontsize=16)
+    plt.legend()
+    plt.grid(True)
     plt.show()
-
 
 if __name__ == "__main__":
-    time_slices_list = [8, 16, 32, 64]
-    correlations = []
-    errors = []
-    energies = []
-    energy_errs = []
-    x_means = []
-    x_mean_errs = []
-
-    for N in time_slices_list:
+    Ns = [8, 16, 32, 64]
+    for N in Ns:
         qpi = QuantumPathIntegral(N, setup_parameters)
         qpi.relax_system()
-        corr, corr_sq, e0, e0_err, x_mean, x_err = qpi.collect_statistics()
+        corr, corr_sq, E_virial, E_virial_err, x_mean, x_err = qpi.collect_statistics()
 
+        beta = 1.0
         num_samples = qpi.mc_steps // qpi.save_gap
-        corr = np.array(corr)
-        corr_sq = np.array(corr_sq)
+        corr = np.array(corr) / num_samples
+        corr_sq = np.array(corr_sq) / num_samples
+        std_err = np.sqrt((corr_sq - corr**2) / num_samples)
 
-        mean_corr = corr / num_samples
-        mean_corr_sq = corr_sq / num_samples
-        std_err = np.sqrt((mean_corr_sq - mean_corr**2) / num_samples)
+        E_fit, E_fit_err, A_fit = fit_energy_from_corr(corr, beta)
+        tau_vals = np.arange(N)
+        norm_corr = corr / corr[0]
+        fit_vals = symmetric_exp(tau_vals, A_fit, E_fit, beta)
 
-        correlations.append(mean_corr)
-        errors.append(std_err)
-        energies.append(e0)
-        energy_errs.append(e0_err)
-        x_means.append(x_mean)
-        x_mean_errs.append(x_err)
+        print(f"N = {N}")
+        print(f"  ⟨x²⟩ energy   = {E_virial:.6f} ± {E_virial_err:.6f}")
+        print(f"  Fitted energy = {E_fit:.6f} ± {E_fit_err:.6f}\n")
 
-        print(f"N = {N}, ⟨x⟩ = {x_mean:.6e} ± {x_err:.2e}")
-        print(f"Energy = {e0:.6f} ± {e0_err:.6f}")
-
-    visualize_correlations(correlations, errors, time_slices_list)
-    plot_avg_x(time_slices_list, x_means, x_mean_errs)
+        plot_fit(tau_vals, norm_corr, fit_vals, N)
