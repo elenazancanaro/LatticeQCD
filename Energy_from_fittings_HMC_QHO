@@ -1,0 +1,202 @@
+import random
+import math
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.optimize import curve_fit
+
+class QuantumPathIntegral:
+    def __init__(self, slices, get_params):
+        self.warmup, self.mc_steps, self.save_gap, self.step_size, self.slices, self.freq, self.mass, self.beta = get_params(slices)
+
+        self.path = [random.uniform(-0.5, 0.5) for _ in range(self.slices)]
+        self.auto_corr = [0.0] * self.slices
+        self.auto_corr_sq = [0.0] * self.slices
+
+        self.avg_x = 0.0
+        self.avg_x2 = 0.0
+        self.avg_x_sq = 0.0
+        self.avg_x2_sq = 0.0
+
+        self.accepted = 0
+        self.tries = 0
+
+    def HMC_step(self, epsilon=0.05, steps=10):
+        x0 = np.array(self.path)
+        p0 = np.random.normal(size=self.slices)
+
+        H0 = 0.5 * np.sum(p0**2) + self.action(x0)
+
+        x_new, p_new = self.molecular_dynamics(x0.copy(), p0.copy(), epsilon, steps)
+
+        H_new = 0.5 * np.sum(p_new**2) + self.action(x_new)
+
+        delta_H = H_new - H0
+        self.tries += 1
+
+        if delta_H < 0 or np.exp(-delta_H) > np.random.rand():
+            self.path = list(x_new)
+            self.accepted += 1
+
+    def molecular_dynamics(self, x, p, epsilon, steps):
+        p -= 0.5 * epsilon * self.grad_action(x)
+
+        for _ in range(steps):
+            x += epsilon * p
+            if _ != steps - 1:
+                p -= epsilon * self.grad_action(x)
+
+        p -= 0.5 * epsilon * self.grad_action(x)
+        return x, p
+
+    def action(self, x):
+        kin = 0.0
+        pot = 0.0
+        N = self.slices
+        a = self.beta / self.slices
+
+        for i in range(N):
+            x_i = x[i]
+            x_ip1 = x[(i + 1) % N]
+            dx = (x_ip1 - x_i) / a
+            kin += 0.5 * self.mass * dx**2 * a
+            pot += 0.5 * self.mass * self.freq**2 * x_i**2 * a
+
+        return kin + pot
+
+    def grad_action(self, x):
+        grad = np.zeros_like(x)
+        N = self.slices
+        a = self.beta / self.slices
+        m = self.mass
+        w = self.freq
+
+        for i in range(N):
+            x_i = x[i]
+            x_ip1 = x[(i + 1) % N]
+            x_im1 = x[(i - 1) % N]
+            grad[i] = m / a * (2 * x_i - x_ip1 - x_im1) + a * m * w**2 * x_i
+
+        return grad
+
+    def relax_system(self):
+        for _ in range(self.warmup):
+            self.HMC_step(epsilon=0.05, steps=20)
+
+    def collect_statistics(self):
+        norm_factor = 1.0 / (self.mc_steps // self.save_gap)
+        num_samples = self.mc_steps // self.save_gap
+
+        for step in range(self.mc_steps):
+            self.HMC_step(epsilon=0.05, steps=20)
+
+            if step % self.save_gap == 0:
+                for j in range(self.slices):
+                    x0 = self.path[0]
+                    xt = self.path[j]
+                    self.auto_corr[j] += xt * x0
+                    self.auto_corr_sq[j] += (xt * x0)**2
+
+                    self.avg_x += self.path[j]
+                    x_sq = self.path[j]**2
+                    self.avg_x_sq += x_sq
+                    self.avg_x2 += x_sq
+                    self.avg_x2_sq += x_sq**2
+
+        renorm = 1.0 / (num_samples * self.slices)
+        x_mean = self.avg_x * renorm
+        x2_mean = self.avg_x_sq * renorm
+
+        x_var = (self.avg_x_sq * renorm - x_mean**2) / num_samples
+        x2_var = (self.avg_x2_sq * renorm - x2_mean**2) / num_samples
+
+        x_err = math.sqrt(abs(x_var))
+        x2_err = math.sqrt(abs(x2_var))
+
+        energy = 0.5 * self.mass * self.freq**2 * x2_mean + 0.5 * self.freq
+        energy_err = 0.5 * self.mass * self.freq**2 * x2_err
+
+        corr_norm = 1.0 / (num_samples * self.mass * self.freq)
+        auto_corr = [x * corr_norm for x in self.auto_corr]
+        auto_corr_sq = [x * (corr_norm**2) for x in self.auto_corr_sq]
+
+        return auto_corr, auto_corr_sq, energy, energy_err, x_mean, x_err
+
+def setup_parameters(n):
+    beta = 4.0
+    warmup_steps = 1000
+    mc_steps = 10000
+    save_gap = 100
+    step_size = 0.5
+    freq = 1.0
+    mass = 1.0
+    return warmup_steps, mc_steps, save_gap, step_size, n, freq, mass, beta
+
+def cosh_model(tau, E, A, beta):
+    return A * np.cosh(E * (tau - beta / 2)) / np.cosh(E * beta / 2)
+
+def plot_fit(tau_vals, corr_vals, fit_vals, N, E_virial, E_fit, E_fit_err):
+    plt.figure(figsize=(8, 6))
+    plt.plot(tau_vals, corr_vals, 'o', label="Data", markersize=4)
+    if fit_vals is not None:
+        label = f"Fit: E = {E_fit/2:.3f}" if E_fit_err is None else f"Fit: E = {E_fit/2:.3f} ± {E_fit_err:.3f}"
+        plt.plot(tau_vals, fit_vals, '-', label=label)
+    plt.xlabel(r'$\tau$', fontsize=14)
+    plt.ylabel(r'$C(\tau)$', fontsize=14)
+    plt.title(f'Correlation Fit for N = {N}\nVirial E={E_virial:.3f}', fontsize=16)
+    plt.legend()
+    plt.grid(True)
+    plt.show()
+
+# Run for N = 32
+N = 32
+qpi = QuantumPathIntegral(N, setup_parameters)
+qpi.relax_system()
+corr, corr_sq, E_virial, E_virial_err, x_mean, x_err = qpi.collect_statistics()
+
+beta = qpi.beta
+num_samples = qpi.mc_steps // qpi.save_gap
+corr = np.array(corr)
+corr_sq = np.array(corr_sq)
+
+var = (corr_sq - corr**2) / num_samples
+var = np.maximum(var, 0.0)
+std_err = np.sqrt(var)
+std_err[std_err < 1e-8] = 1e-8
+
+tau_vals = np.arange(N) * beta / N
+
+print(f"N = {N}")
+print(f"  ⟨x²⟩ energy   = {E_virial:.6f} ± {E_virial_err:.6f}")
+
+try:
+    mask = tau_vals <= beta / 2
+    popt, pcov = curve_fit(
+        lambda tau, E, A: cosh_model(tau, E, A, beta),
+        tau_vals[mask], corr[mask],
+        sigma=std_err[mask], absolute_sigma=True,
+        p0=(1.0, corr[1])
+    )
+
+    E_fit, A_fit = popt
+    residuals = corr[mask] - cosh_model(tau_vals[mask], *popt, beta)
+    chi2 = np.sum((residuals / std_err[mask])**2)
+    dof = len(corr[mask]) - len(popt)
+    if dof > 0:
+        pcov *= chi2 / dof
+
+    if np.any(np.isnan(pcov)) or np.any(np.isinf(pcov)):
+        E_fit_err = None
+        print(f"  Fit energy     = {E_fit/2:.6f} (unreliable)")
+    else:
+        E_fit_err = np.sqrt(pcov[0, 0])
+        print(f"  Fit energy     = {E_fit/2:.6f} ± {E_fit_err:.6f}")
+
+    fit_vals = cosh_model(tau_vals, E_fit, A_fit, beta)
+
+except (RuntimeError, ValueError):
+    print("  Fit failed")
+    fit_vals = None
+    E_fit = None
+    E_fit_err = None
+
+plot_fit(tau_vals, corr, fit_vals, N, E_virial, E_fit, E_fit_err)
